@@ -1,161 +1,145 @@
-use eyre::{eyre, Result, WrapErr};
-use serde::{Deserialize, Serialize};
-use std::env;
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
-use structopt::StructOpt;
+//! Cargo subcommand to run `clippy`
+//! with external lints defined in a `lints.toml`
 
-#[derive(Debug, StructOpt)]
-#[structopt(name = "cargo lints")]
-/// Utility for working with specific lints of clippy
-enum Cargo {
-    Lints(Args),
-}
+// Features
+#![feature(command_access)]
 
-#[derive(Debug, StructOpt)]
-struct Args {
-    /// Path to lints.toml file
-    #[structopt(short, long, parse(from_os_str))]
-    file: Option<PathBuf>,
-    /// Subcommand
-    #[structopt(subcommand)]
-    cmd: Subcommands,
-}
+// Imports
+use std::{
+	env,
+	ffi::OsString,
+	fs,
+	path::{Path, PathBuf},
+	process::{Command, ExitStatus},
+};
 
-#[derive(Debug, StructOpt)]
-#[structopt(name = "cargo lints")]
-enum Subcommands {
-    /// Formats lints.toml file
-    Fmt,
-    /// Runs clippy with lints enabled from lints.toml file
-    #[structopt(external_subcommand)]
-    Clippy(Vec<String>),
-}
+use anyhow::Context;
 
-#[derive(Clone, Serialize, Deserialize, Default, Debug)]
+/// All lints defined in file
+#[derive(Clone, Default, Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Lints {
-    #[serde(skip)]
-    file: Option<PathBuf>,
-
-    #[serde(default)]
-    deny: Vec<String>,
-    #[serde(default)]
-    allow: Vec<String>,
-    #[serde(default)]
-    warn: Vec<String>,
+	#[serde(default)]
+	deny:  Vec<String>,
+	#[serde(default)]
+	allow: Vec<String>,
+	#[serde(default)]
+	warn:  Vec<String>,
 }
-
-const LINTS_FILE: &str = "lints.toml";
-const COMMENT: &str = r#"#
-# For all clippy lints please visit: https://rust-lang.github.io/rust-clippy/master/
-#
-"#;
 
 impl Lints {
-    pub fn find_config_file() -> Result<Option<PathBuf>> {
-        let mut path =
-            env::current_dir().wrap_err("Failed to get current directory")?;
-        loop {
-            let lints = path.join(LINTS_FILE);
-            if !lints.exists() {
-                match path.parent() {
-                    Some(parent) => path = parent.to_path_buf(),
-                    None => return Ok(None),
-                }
-                continue;
-            }
-            if !lints.is_file() {
-                return Err(eyre!("{:?} supposed to be file", lints));
-            }
-            return Ok(Some(lints));
-        }
-    }
-
-    pub fn from_config() -> Result<Self> {
-        Self::find_config_file()?
-            .map_or_else(|| Ok(Lints::default()), Self::from_config_with_path)
-    }
-
-    pub fn from_config_with_path(file: PathBuf) -> Result<Self> {
-        let mut lints: Self = fs::read_to_string(&file)
-            .wrap_err("Failed to read config")
-            .map(|s| toml::from_str(&s))?
-            .wrap_err("Failed to parse config")?;
-        lints.file = Some(file);
-        Ok(lints)
-    }
-
-    pub fn fmt(&mut self) -> Result<()> {
-        let file = self
-            .file
-            .clone()
-            .ok_or_else(|| eyre!("Failed to find file with lints"))?;
-
-        self.allow.sort();
-        self.deny.sort();
-        self.warn.sort();
-        toml::to_string_pretty(&self)
-            .wrap_err("Failed to format toml to string")
-            .map(|s| COMMENT.to_owned() + &s)
-            .map(|content| fs::write(file, content))?
-            .wrap_err("Failed to write lints to file")
-    }
-
-    fn deny_flags(&self) -> Vec<String> {
-        self.deny
-            .iter()
-            .flat_map(|lint| vec!["-D".to_owned(), lint.clone()].into_iter())
-            .collect()
-    }
-
-    fn warn_flags(&self) -> Vec<String> {
-        self.warn
-            .iter()
-            .flat_map(|lint| vec!["-W".to_owned(), lint.clone()].into_iter())
-            .collect()
-    }
-
-    fn allow_flags(&self) -> Vec<String> {
-        self.allow
-            .iter()
-            .flat_map(|lint| vec!["-A".to_owned(), lint.clone()].into_iter())
-            .collect()
-    }
-
-    pub fn clippy(&self, args: &[String]) -> Result<()> {
-        let code = Command::new("cargo")
-            .arg("clippy")
-            .args(args)
-            .arg("--")
-            .args(self.deny_flags())
-            .args(self.warn_flags())
-            .args(self.allow_flags())
-            .spawn()
-            .wrap_err("Failed to start clippy")?
-            .wait()
-            .wrap_err("Failed to wait till finish of clippy")?;
-
-        if code.success() {
-            return Ok(());
-        }
-
-        Err(eyre!("Clippy failed with code {}", code))
-    }
+	/// Lints filename
+	const FILE_NAME: &'static str = "lints.toml";
 }
 
-fn main() -> Result<()> {
-    let Cargo::Lints(Args { cmd, file }) = Cargo::from_args();
-    let mut lints =
-        file.map_or_else(Lints::from_config, Lints::from_config_with_path)?;
+impl Lints {
+	/// Finds the config path in the current directory or any
+	/// parent directory
+	pub fn find_config_path() -> Result<Option<PathBuf>, anyhow::Error> {
+		// Get the current path to start looking
+		let mut cur_path = env::current_dir().context("Failed to get current directory")?;
 
-    match cmd {
-        Subcommands::Fmt => lints.fmt(),
-        Subcommands::Clippy(args) if args[0] == "clippy" => {
-            lints.clippy(&args[1..])
-        }
-        Subcommands::Clippy(args) => {
-            Err(eyre!("Unknown subcommand: `{}'", args[0]))
-        }
-    }
+		// Then keep ascending until we find it
+		loop {
+			// Get the path
+			let lints_path = cur_path.join(Lints::FILE_NAME);
+
+			// Then check if it exists
+			match lints_path.exists() {
+				// If it did, return it
+				true => break Ok(Some(lints_path)),
+
+				// Else check if we still have a parent
+				false => match cur_path.parent() {
+					// If so, retry
+					Some(parent) => cur_path = parent.to_path_buf(),
+					// Else return `None`
+					None => return Ok(None),
+				},
+			}
+		}
+	}
+
+	/// Parses the lints from config
+	pub fn from_config() -> Result<Self, anyhow::Error> {
+		Self::find_config_path()?.map_or_else(|| Ok(Lints::default()), |path| Self::from_config_with_path(&path))
+	}
+
+	/// Parses the lints from a path
+	pub fn from_config_with_path(path: &Path) -> Result<Self, anyhow::Error> {
+		fs::read_to_string(path)
+			.context("Failed to read config")
+			.map(|s| toml::from_str(&s))?
+			.context("Failed to parse config")
+	}
+
+	/// Constructs all deny flags
+	fn deny_flags(&self) -> Vec<String> {
+		self.deny
+			.iter()
+			.flat_map(|lint| vec!["-D".to_owned(), lint.clone()].into_iter())
+			.collect()
+	}
+
+	/// Constructs all warn flags
+	fn warn_flags(&self) -> Vec<String> {
+		self.warn
+			.iter()
+			.flat_map(|lint| vec!["-W".to_owned(), lint.clone()].into_iter())
+			.collect()
+	}
+
+	/// Constructs all allow flags
+	fn allow_flags(&self) -> Vec<String> {
+		self.allow
+			.iter()
+			.flat_map(|lint| vec!["-A".to_owned(), lint.clone()].into_iter())
+			.collect()
+	}
+
+	/// Runs clippy with `args`
+	pub fn run_clippy(&self, args: impl IntoIterator<Item = OsString>) -> Result<ExitStatus, anyhow::Error> {
+		// Build the command
+		let mut cmd = Command::new("cargo");
+		let cmd = cmd
+			.arg("clippy")
+			.args(args)
+			.arg("--")
+			.args(self.deny_flags())
+			.args(self.warn_flags())
+			.args(self.allow_flags());
+
+		// Print what we're running
+		eprint!("Running \"cargo\"");
+		for arg in cmd.get_args() {
+			eprint!(", {:?}", arg);
+		}
+		eprintln!();
+
+		// Spawn it and wait
+		cmd.spawn()
+			.context("Unable to start clippy")?
+			.wait()
+			.context("Unable to wait for clippy")
+	}
+}
+
+fn main() -> Result<(), anyhow::Error> {
+	// Get the lints
+	let lints = Lints::from_config()?;
+
+	// Then run clippy
+	let get_args = || std::env::args_os();
+	let status = match get_args().nth(1) {
+		// If we were run with `cargo`, skip the next argument (which will be our filename)
+		// Note: When running with cargo, we're run with `clippy-lints` in the 2nd argument
+		Some(arg) if arg == "clippy-lints" => lints.run_clippy(get_args().skip(2))?,
+		_ => lints.run_clippy(get_args().skip(1))?,
+	};
+
+	// And check the status
+	match status {
+		status if status.success() => Ok(()),
+		_ => anyhow::bail!("Clippy returned non-0 status: {}", status),
+	}
 }

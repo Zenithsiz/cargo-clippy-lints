@@ -1,17 +1,16 @@
 [package]
-name = "cargo-lints"
-version = "0.1.0"
 authors = ["i1i1"]
-edition = "2018"
-license = "MIT"
-repository = "https://github.com/i1i1/cargo-lints"
-readme = "README.md"
-keywords = ["cmd", "lints", "clippy", "cargo", "cli"]
 categories = ["cli", "lints", "cargo"]
 description = "Utility for running lints specified from files"
+edition = "2018"
+keywords = ["cmd", "lints", "clippy", "cargo", "cli"]
+license = "MIT"
+name = "cargo-clippy-lints"
+readme = "README.md"
+repository = "https://github.com/i1i1/cargo-lints"
+version = "0.1.0"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0.44"
+serde = {version = "1.0.130", features = ["derive"]}
 toml = "0.5.8"
-structopt = "0.3"
-eyre = "0.6"

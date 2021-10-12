@@ -13,5 +13,6 @@ allow = [
     'clippy::must_use_candidate',
     'clippy::use_self',
     'clippy::wildcard_imports',
+    'clippy::match_bool',
 ]
 warn = []
