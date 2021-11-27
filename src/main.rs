@@ -105,8 +105,8 @@ impl Lints {
 			.arg("clippy")
 			.args(args)
 			.arg("--")
-			.args(self.deny_flags())
 			.args(self.warn_flags())
+			.args(self.deny_flags())
 			.args(self.allow_flags());
 
 		// Print what we're running
